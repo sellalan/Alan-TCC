@@ -1,0 +1,218 @@
+//*************************************************************************
+// definicoes básicas
+#include <Wire.h>       //sensor
+#include <VL53L0X.h>    //sensor
+#include <LiquidCrystal_I2C.h>
+#include <Servo.h>
+#include <Keypad.h>
+#include <stdlib.h>
+
+String buf = "";
+String set0 = "100";
+String set1 = "150";
+String set2 = "200";
+
+int i = 0;
+const byte ROWS = 4;
+const byte COLS = 4;
+char keys[ROWS][COLS] = {
+  {'1', '2', '3', 'A'},
+  {'4', '5', '6', 'B'},
+  {'7', '8', '9', 'C'},
+  {'*', '0', '#', 'D'}
+};
+byte rowPins[ROWS] = {2, 3, 4, 5};
+byte colPins[COLS] = {6, 7, 8, 9};
+Keypad keypad = Keypad( makeKeymap(keys), rowPins, colPins, ROWS, COLS );
+Servo servo_9;
+VL53L0X sensor;
+LiquidCrystal_I2C lcd(0x3F, 20, 4); // set the LCD address to 0x27 for a 16 chars and 2 line display
+
+#define ledPin 13
+#define Upin 10  // saida PWM servo motor
+#define Ypin 11   // entrada analogica do sensor
+#define T 0.02 // período de amostragem [ms]
+#define kMAX 10000 // tempo de execucao T*kMax [ms]
+#define kp  0.75   //  TAVA 0.75
+#define ki  0     //  TAVA 0
+#define kd  0.23      //  TAVA 0.23
+#define N   9       //  TAVA 8
+
+int index = 0;
+float soma = 0;
+float yy[N] = {0};
+int RR = 50;
+int k = 0;
+bool segura = 1;
+int rr = 0;
+//*************************************************************************
+//                  leitura da saida
+//*************************************************************************
+float le_saida(int pin) //leitura do sinal no pino "PIN"
+{
+  return sensor.readRangeSingleMillimeters();
+}
+//*************************************************************************
+//    Confere os limites do sinal e aplica no pino de saida "pin"
+//*************************************************************************
+void aplica_entrada(int u, int pin)
+{
+  if (u < -40)u = -40;
+  if (u > 40)u = 40;
+  servo_9.write(u + 40); // Escreve o sinal de controle na saída
+}
+
+//*************************************************************************
+//                  Imprime dados
+//*************************************************************************
+void imprime_dados(float u, float y)
+{
+  Serial.print(k * 0.02);  // Imprime o numero da amostra
+  Serial.print("\t");
+  Serial.print(u);    // Imprime o sinal de entrada
+  Serial.print("\t");
+  Serial.println(y);  // Imprime o sinal de saida
+}
+//*************************************************************************
+//                  Fim do programa
+//*************************************************************************
+void fim()
+{ //Para o timer
+  TIMSK1 = 0;
+  // Coloca o pino de saída em nível baixo ao terminar
+  servo_9.write(40); // posiscao do servo quando finaliza
+  digitalWrite(Upin, LOW);
+}
+//*************************************************************************
+//                  Interrupcao Timer 1
+//*************************************************************************
+ISR(TIMER1_OVF_vect)          // timer overflow interrupt service routine
+{
+  // reinicializa o timer
+  TCNT1 = 0x63C0; // preload timer 65536-16MHz/8/50Hz = 25536 = 0x63C0
+  // incrementa o contador
+  k = k + 1;
+  segura = 0;
+  digitalWrite(ledPin, digitalRead(ledPin) ^ 1); //inverte estado do led
+}
+//*************************************************************************
+//                        SETUP
+//*************************************************************************
+void setup()
+{
+  // Entradas e Saidas
+  servo_9.attach(Upin);   //entrada do sinal do servo
+  pinMode(Ypin, INPUT_PULLUP);                   //sensor
+  digitalWrite(Ypin, HIGH);                      //sensor
+  Wire.begin();                                  //sensor
+  sensor.init();                                 //sensor
+  sensor.startContinuous();                      //sensor
+  sensor.setTimeout(100);                        //sensor
+  sensor.setMeasurementTimingBudget(20000);      //sensor
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print ("Pressione *            Alan Sell");
+  pinMode(13, OUTPUT);
+  digitalWrite(ledPin, 0);
+  // esperar o sistema se acomodar
+  delay(2000);
+  // initialize timer1
+  noInterrupts();           // disable all interrupts
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1 = 0x63C0; // preload timer 65536-16MHz/8/50Hz = 25536 = 0x63C0
+  TCCR1B |= (1 << CS21);  // 8 prescaler
+  TIMSK1 |= (1 << TOIE1); // enable timer overflow interrupt
+  interrupts();           // enable all interrupts
+  Serial.begin(115200);
+  Serial.println("% Inicio do programa");
+  Serial.println("clear all; clc;");
+  Serial.println("dados = [");
+}
+//*************************************************************************
+//                MAIN
+//*************************************************************************
+void loop()
+{
+  float y = 0, u = 0;
+  static float  up = 0, ui = 0, ud = 0, e = 0, e0 = 0;
+  static int r = rr;
+  char key = keypad.getKey();
+  if (key != NO_KEY) {
+    if (key == '*')
+    {
+      i = 0;
+      lcd.clear();
+      buf = "";
+      Set();
+    }
+  }
+  while (segura)              // tempo ocioso
+  {
+    delay(0);
+  }
+  segura = 1;
+  // le a saida
+  y = le_saida(Ypin);
+
+  //filtro de media movel tamanho N
+  soma -=  yy[index];
+  soma += y;
+  yy[index] = y;
+  y = soma / (N);
+  index += 1;
+  if (index >= N)index = 0;
+
+  if (buf == set0)
+  {
+    r = 100;
+  }
+  if (buf == set1)
+  {
+    r = 150;
+  }
+  if (buf == set2)
+  {
+    r = 200;
+  }
+
+  if (k > 10)
+  {
+
+    e = r - y;                  //e=erro  r=referencia(setpoint)  y=saída
+    up = kp * e;                //up=controlador proporcional
+    ui = ui + T * ki * e;       //ui=controlador integral   T=periodo de amostragem
+    ud = kd * ( e - e0) / T;    //ud=Controlador derivativo   e0=erro acumulativo
+    u = ui + ud + up;           //PID
+    e0 = e;
+
+    if (ui > 20)ui = 20;
+    if (ui < -20)ui = -20;
+  }
+
+  // aplica entrada
+  aplica_entrada((int)u, Upin);
+
+  // imprime os dados
+  imprime_dados(u, y);
+
+  if (k >=  kMAX)
+  {
+    fim();
+  }
+}     //fim do void loop
+
+void Set()
+{
+  while (i < 3) {
+    lcd.setCursor (0, 0);
+    lcd.print ("SetPoint: ");
+    char key = keypad.getKey();
+    if (key != NO_KEY) {
+      buf += key;
+      lcd.print(buf);
+      i++;
+    }
+  }
+}
